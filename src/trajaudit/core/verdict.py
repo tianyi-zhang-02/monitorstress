@@ -26,7 +26,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class IntegrityLabel(StrEnum):
@@ -58,12 +58,39 @@ class SemanticLabel(StrEnum):
 
     ``abstain`` is first-class: the judge declines to commit when the
     trajectory is genuinely ambiguous, rather than coercing a binary
-    call.
+    call. When ``verdict == ABSTAIN`` the verdict's :attr:`abstain` flag
+    must also be ``True`` and ``confidence_band`` must be the maximally
+    uninformative ``(0.0, 1.0)``; the consistency is enforced by a
+    validator on :class:`SemanticVerdict`.
     """
 
     EXPLOIT_LIKELY = "exploit_likely"
     CLEAN = "clean"
     ABSTAIN = "abstain"
+
+
+class TaxonomyTag(StrEnum):
+    """Behavioural taxonomy categories the judge may attach to a verdict.
+
+    The initial enum values cover the categories documented in the
+    monitor-evaluation literature (notably MALT). The enum is
+    intentionally open to extension; ``OTHER`` is the explicit catch-all
+    and ``NORMAL`` is the benign-trajectory label.
+    """
+
+    BYPASS_CONSTRAINTS = "bypass_constraints"
+    IGNORES_TASK_INSTRUCTIONS = "ignores_task_instructions"
+    HARDCODED_SOLUTION = "hardcoded_solution"
+    BRUTE_FORCED_SOLUTION = "brute_forced_solution"
+    GIVES_UP = "gives_up"
+    SABOTAGE = "sabotage"
+    MATCH_WEAKER_MODEL = "match_weaker_model"
+    PARTIAL_PROBLEM_SOLVING = "partial_problem_solving"
+    REASONING_ABOUT_TASK = "reasoning_about_task"
+    REFUSALS = "refusals"
+    EVALUATION_AWARENESS = "evaluation_awareness"
+    OTHER = "other"
+    NORMAL = "normal"
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +154,18 @@ class SemanticVerdict(BaseModel):
     """Layer 3 (LLM judge) verdict.
 
     The schema is deliberately not a scalar. ``confidence_band`` is a
-    closed [low, high] interval — judges that can't put tight bounds
+    closed ``[low, high]`` interval — judges that can't put tight bounds
     on themselves widen the band, and the escalation policy uses
     band-width (not a point estimate) to decide whether to climb a
     tier.
+
+    ``abstain`` is a first-class flag (in addition to the matching
+    :attr:`SemanticLabel.ABSTAIN` value) so calibration code and
+    selective-prediction analyses can branch on a single boolean
+    without inspecting the label. When ``abstain=True`` the verdict's
+    label must be ``ABSTAIN`` and its ``confidence_band`` must be
+    ``(0.0, 1.0)``; the inverse direction is enforced too. See
+    :meth:`_validate_band_and_abstain`.
 
     ``escalated`` / ``escalated_from`` record provenance so a verdict
     that was upgraded from a small local model to a frontier API is
@@ -147,6 +182,13 @@ class SemanticVerdict(BaseModel):
         ...,
         description="Free-text rationale from the judge, expected to cite specific steps.",
     )
+    abstain: bool = Field(
+        default=False,
+        description=(
+            "True iff the judge declines to commit. Must agree with verdict==ABSTAIN "
+            "and confidence_band==(0.0, 1.0)."
+        ),
+    )
     escalated: bool = Field(
         default=False,
         description="True iff this verdict came from a higher tier than the default.",
@@ -155,9 +197,9 @@ class SemanticVerdict(BaseModel):
         None,
         description="Tier this verdict was escalated from, e.g. 'vllm-qwen2.5-7b'.",
     )
-    taxonomy_tags: list[str] = Field(
+    taxonomy_tags: list[TaxonomyTag] = Field(
         default_factory=list,
-        description="COBA-derived component tags the judge attached to the trajectory.",
+        description="Behavioural taxonomy tags the judge attached to the trajectory.",
     )
 
     @property
@@ -165,6 +207,31 @@ class SemanticVerdict(BaseModel):
         """Width of the confidence band — used by the escalation policy."""
         lo, hi = self.confidence_band
         return hi - lo
+
+    @model_validator(mode="after")
+    def _validate_band_and_abstain(self) -> SemanticVerdict:
+        """Enforce band ordering, [0, 1] range, and abstain consistency."""
+        lo, hi = self.confidence_band
+        if not (0.0 <= lo <= hi <= 1.0):
+            raise ValueError(
+                f"confidence_band must satisfy 0.0 <= lo <= hi <= 1.0; got ({lo}, {hi})"
+            )
+        if self.abstain:
+            if self.verdict is not SemanticLabel.ABSTAIN:
+                raise ValueError(
+                    "abstain=True requires verdict=SemanticLabel.ABSTAIN; "
+                    f"got verdict={self.verdict!r}"
+                )
+            if self.confidence_band != (0.0, 1.0):
+                raise ValueError(
+                    "abstain=True requires confidence_band=(0.0, 1.0); "
+                    f"got {self.confidence_band}"
+                )
+        elif self.verdict is SemanticLabel.ABSTAIN:
+            raise ValueError(
+                "verdict=SemanticLabel.ABSTAIN requires abstain=True"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
