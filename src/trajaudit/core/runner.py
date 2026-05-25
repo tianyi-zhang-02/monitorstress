@@ -1,5 +1,11 @@
 """Top-level orchestrator that runs the three-layer audit pipeline.
 
+.. note::
+   **Phase 0 scaffold. Public API shape is provisional. All runtime
+   methods raise** ``NotImplementedError``. Will be substantively
+   implemented in Phase 1 once the monitor adapter contract is
+   finalized.
+
 The :class:`AuditRunner` accepts a :class:`~trajaudit.core.trajectory.Trajectory`
 and dispatches it through (any subset of) the workspace, syntactic, and
 semantic layers, then composes their outputs into an
@@ -40,9 +46,21 @@ class AuditRunner:
         self.config = config or AuditConfig()
 
     def audit(self, trajectory: Trajectory) -> AuditVerdict:
-        """Audit a single trajectory and return its composed verdict."""
+        """Run all enabled layers over a single trajectory and return the composed verdict.
+
+        Phase 0 scaffold — not yet implemented. Phase 1 will dispatch
+        the trajectory through Layers 1, 2, and 3 according to
+        :attr:`config`, then call :meth:`AuditVerdict.compose` to
+        produce the final structured verdict.
+        """
         raise NotImplementedError("Phase 1: implement single-trajectory orchestration.")
 
     def audit_many(self, trajectories: list[Trajectory]) -> list[AuditVerdict]:
-        """Audit a batch of trajectories. May parallelize in later phases."""
+        """Run :meth:`audit` over a batch of trajectories.
+
+        Phase 0 scaffold — not yet implemented. Phase 1 will run
+        trajectories sequentially; later phases may parallelize at the
+        process or container level depending on which layers are
+        enabled.
+        """
         raise NotImplementedError("Phase 1: implement batched orchestration.")
