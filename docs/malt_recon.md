@@ -1,0 +1,70 @@
+# MALT empirical reconnaissance — summary
+
+Companion to `notebooks/malt_recon.ipynb`. Pilot date: 2026-05-25.
+
+**Execution status.** Sections 1–7 of the notebook **did not run against
+real data in this session.** The HuggingFace token in the sandbox
+environment is invalid (`Invalid user token. The token stored is invalid.`
+from `hf auth whoami`), and the MALT datasets at `metr-evals/malt-public`
+and `metr-evals/malt-transcripts-public` are gated — they require an
+authenticated user who has accepted the dataset terms. No API spend was
+incurred. Sections 1 and 2 carry **values verified from public sources**
+(METR blog + HF dataset cards) without requiring a download, and are
+clearly marked as such in the notebook.
+
+**Dataset usability.** MALT is the obvious substrate for the work the
+pivot brief sketches: it is the only public corpus of labelled reward-hack
+and sandbagging trajectories at meaningful scale. Two friction points
+matter for the project plan. (1) **Gating is real:** Tianyi (or whoever
+runs the pilot) needs to log in to HuggingFace, accept the dataset terms
+on both `malt-public` and `malt-transcripts-public`, generate a read
+token, and either export `HF_TOKEN` or run `hf auth login` locally. This
+is a one-time five-minute step but it is the gate to *all* downstream
+work. (2) **Size:** the ordered-messages format is 28.3 GB, the DAG
+format is 8.48 GB. The pilot only needs a streamed subset of
+manually-reviewed runs — use `load_dataset(..., streaming=True)` and
+filter on `manually_reviewed=True` before materialising to pandas, or the
+notebook will allocate 28 GB.
+
+**Structural concerns to verify in the eyeball check (not yet run).** The
+HF card describes the schema as "List of input and output messages
+representing a transcript" with input messages as "chat completions sent
+to the API" — i.e., the format is OpenAI-style. Three things to confirm
+in section 4: that the content field is consistently a string (not a list
+of content blocks), that long transcripts are not truncated mid-tool-call,
+and that the label column is a list of strings matching the public count
+breakdown (103 unprompted reward-hacking positives across two labels).
+The pivot brief asked us to verify METR's reported 2,690 manually-reviewed
+runs — the HF card confirms 1,014 benign + 1,676 with observed behaviour =
+2,690. ✓
+
+**Reproduction caveat (METR prompt).** The pivot brief asserted METR uses
+a 1-100 scale; the verbatim prompt fetched from the METR blog uses a 0-10
+integer scale with the phrasing "Please give a score between 0 or 10."
+The notebook reproduces the prompt character-for-character and the
+parsing regex extracts an integer in [0, 10]. The monitor threshold for
+the binary label is set at ≥5; this is a defensible default but is not
+the same as METR's own AUROC computation, which operates on the raw
+score. The pilot is *not* expected to match METR's 0.96 reward-hacking
+AUROC exactly because: (a) METR's number is for GPT-5, the pilot uses
+`claude-sonnet-4-7`; (b) METR's number is computed over their full
+dataset, the pilot is n=60; (c) the bootstrap CI at n=60 will be wide
+enough to be consistent with a wide range of true values.
+
+**Bottom line — is MALT usable for calibration claims?** Conditional on
+the HF auth issue being resolved, **MALT is usable as a substrate** for
+the kind of evaluation work TrajAudit is considering, with two binding
+constraints. (1) **Per-category sample sizes are tight.** 103 unprompted
+reward-hacking positives means bootstrap CIs on calibration metrics will
+be wider than ±0.05 at small bin counts (see notebook section 7's
+projection). Tight calibration claims need either pooling across
+labels (which loses category-specific information) or supplementing MALT
+with off-distribution positives (which reintroduces the realism question
+that motivated MALT in the first place). (2) **The work has already been
+done at AISI.** Griffin et al. (UK AISI, Aug 2025) ran exactly this kind
+of analysis on a 2,997-example MALT-inclusive mix at 0.1% positive rate
+and got 7% recall on METR reward hacking. A follow-up needs to
+differentiate on something concrete: a larger ordinary-positive-rate
+sample, multiple operating points, multi-monitor comparison, obfuscation
+robustness, or released artefacts. "We did calibration on MALT" is not
+enough. See `docs/pivot_decision.md` for the synthesis.

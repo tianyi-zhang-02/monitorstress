@@ -52,3 +52,8 @@ artifacts/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Notebook run outputs (notebooks themselves ARE tracked)
+notebooks/malt_recon_outputs.json
+notebooks/*_outputs.json
+notebooks/*.parquet
