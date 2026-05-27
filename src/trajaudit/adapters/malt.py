@@ -324,8 +324,9 @@ def load_malt_split(
 
     from datasets import load_dataset  # local import: heavy dep, skip if never called
 
-    hf_split = "train" if split == "public" else split
-    ds = load_dataset("metr-evals/malt-public", split=hf_split, token=token)
+    # MALT publishes its data under the split name "public" — not the
+    # HuggingFace default "train". Pass through verbatim.
+    ds = load_dataset("metr-evals/malt-public", split=split, token=token)
 
     yielded = 0
     for row in ds:
