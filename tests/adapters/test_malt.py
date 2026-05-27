@@ -195,3 +195,63 @@ def test_observation_event_preserves_tool_result() -> None:
     traj = malt_row_to_trajectory(_load_fixture("benign.json"))
     observations = [e for e in traj.events if isinstance(e, ObservationEvent)]
     assert any("main.py" in o.content for o in observations)
+
+
+# ---------------------------------------------------------------------------
+# Real MALT shape: nested metadata + OpenAI-style function_call messages
+# ---------------------------------------------------------------------------
+
+
+def test_real_shape_loads() -> None:
+    """Real MALT rows nest under `metadata` + use `input`/`output` keys
+    + OpenAI-style function_call. Verify the adapter handles all three."""
+    traj = malt_row_to_trajectory(_load_fixture("real_shape_openai_function_call.json"))
+    assert traj.benchmark == "malt-public"
+    assert traj.trajectory_id == "999001"  # run_id
+    assert traj.task_id == "machine_learning_local/cifar10"
+    assert traj.agent_id == "claude-3-5-sonnet-20240620"
+    assert traj.metadata["labels"] == ["hardcoded_solution"]
+    assert traj.metadata["manually_reviewed"] is True
+    assert traj.metadata["run_source"] == "unprompted"
+
+
+def test_real_shape_function_call_becomes_tool_call() -> None:
+    traj = malt_row_to_trajectory(_load_fixture("real_shape_openai_function_call.json"))
+    tool_calls = [e for e in traj.events if isinstance(e, ToolCallEvent)]
+    assert len(tool_calls) == 2
+    assert tool_calls[0].tool_name == "edit_file"
+    assert tool_calls[0].arguments == {
+        "path": "submission.py",
+        "new_content": "def predict(x): return 'cat'",
+    }
+    assert tool_calls[1].tool_name == "run_eval"
+    assert tool_calls[1].arguments == {}
+
+
+def test_real_shape_function_response_becomes_observation() -> None:
+    traj = malt_row_to_trajectory(_load_fixture("real_shape_openai_function_call.json"))
+    observations = [e for e in traj.events if isinstance(e, ObservationEvent)]
+    assert len(observations) == 2
+    assert "file written" in observations[0].content
+    assert "Accuracy" in observations[1].content
+
+
+def test_real_shape_function_call_links_to_observation() -> None:
+    """Adjacent function_call/function pairs share a call_id."""
+    traj = malt_row_to_trajectory(_load_fixture("real_shape_openai_function_call.json"))
+    pairs = list(traj.paired_calls())
+    assert len(pairs) == 2
+    for call, obs in pairs:
+        assert obs is not None
+        assert call.call_id == obs.call_id
+
+
+def test_real_shape_developer_role_treated_as_framing() -> None:
+    """`role == "developer"` is a framing role — no event emitted."""
+    traj = malt_row_to_trajectory(_load_fixture("real_shape_openai_function_call.json"))
+    # Developer message + user task framing should both be skipped.
+    # The assistant's first text turn ("I'll start by hardcoding the labels.")
+    # IS a reasoning event.
+    reasoning = [e for e in traj.events if isinstance(e, ReasoningEvent)]
+    assert len(reasoning) == 1
+    assert "hardcoding" in reasoning[0].content

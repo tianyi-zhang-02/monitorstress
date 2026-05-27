@@ -43,6 +43,7 @@ documented here so downstream code can detect it (``ts.year == 2025`` plus
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -102,88 +103,165 @@ def _events_from_messages(
     """Convert a list of MALT messages to ``TrajectoryEvent`` instances.
 
     Returns ``(events, next_index)`` so a caller can chain multiple message
-    lists (e.g., ``input_messages`` followed by ``output_messages``) while
-    keeping the synthesized timestamps monotone.
+    lists (e.g., ``input`` followed by ``output``) while keeping the
+    synthesized timestamps monotone.
+
+    The adapter handles both message conventions MALT uses across rows:
+
+    1. **OpenAI chat-completion format** (the on-disk MALT representation):
+       ``content`` is a string or None, tool invocations live on
+       ``msg["function_call"] = {"name", "arguments"}``, tool results
+       arrive on ``role == "function"`` messages.
+    2. **Anthropic content-block format** (used by the test fixtures and
+       any future MALT release that switches to it): ``content`` is a list
+       of blocks with ``type`` in ``{"text", "tool_use", "tool_result"}``.
 
     Mapping rules:
 
-    * ``role == "system"`` or the first ``role == "user"`` text-only message
-      is treated as task framing and does not emit an event.
-    * ``role == "assistant"`` with text blocks → :class:`ReasoningEvent` per
-      text block (one event each, preserving order).
-    * ``role == "assistant"`` with ``tool_use`` blocks → :class:`ToolCallEvent`
-      with ``call_id`` copied from the block when present.
-    * ``role == "user"`` (or ``"tool"``) with ``tool_result`` blocks →
-      :class:`ObservationEvent` with ``call_id`` linked back to the original
-      tool call.
-
-    Any block whose ``type`` we don't recognize is folded into a
-    :class:`ReasoningEvent` so no content is silently lost.
+    * ``role in {"system", "developer"}`` → framing, no event.
+    * The first ``role == "user"`` text-only message is also treated as
+      framing (it is the task prompt).
+    * ``role == "assistant"`` with ``function_call`` → :class:`ToolCallEvent`
+      with arguments parsed from JSON when the field is a string.
+    * ``role == "assistant"`` with Anthropic-style ``tool_use`` blocks →
+      :class:`ToolCallEvent`.
+    * ``role == "assistant"`` with text content → :class:`ReasoningEvent`.
+    * ``role in {"function", "tool"}`` → :class:`ObservationEvent`,
+      ``source="tool_result"``. The function's ``name`` field links back
+      to a prior :class:`ToolCallEvent` when present.
+    * Anything else: folded into a :class:`ReasoningEvent` so no content
+      is silently lost.
     """
     events: list[TrajectoryEvent] = []
     index = start_index
     synthesized_call_counter = 0
     framing_consumed = False
+    last_call_id_by_tool: dict[str, str] = {}
 
     for msg in messages:
         role = msg.get("role")
+        ts = _synthetic_ts(index)
+
+        # ---- Framing roles never emit events. -----------------------------
+        if role in ("system", "developer"):
+            continue
+
+        # ---- OpenAI-style function_call -> ToolCallEvent ------------------
+        function_call = msg.get("function_call")
+        if role == "assistant" and isinstance(function_call, dict):
+            tool_name = str(function_call.get("name") or "unknown")
+            raw_args = function_call.get("arguments")
+            args: dict[str, Any]
+            if isinstance(raw_args, dict):
+                args = dict(raw_args)
+            elif isinstance(raw_args, str):
+                try:
+                    parsed = json.loads(raw_args)
+                    args = parsed if isinstance(parsed, dict) else {"_raw": raw_args}
+                except json.JSONDecodeError:
+                    args = {"_raw": raw_args}
+            else:
+                args = {}
+            call_id = f"{transcript_id}-{synthesized_call_counter}"
+            synthesized_call_counter += 1
+            last_call_id_by_tool[tool_name] = call_id
+            events.append(
+                ToolCallEvent(
+                    tool_name=tool_name,
+                    arguments=args,
+                    call_id=call_id,
+                    timestamp=ts,
+                )
+            )
+            index += 1
+            framing_consumed = True
+            continue
+
+        # ---- OpenAI-style function/tool response -> ObservationEvent ------
+        if role in ("function", "tool"):
+            tool_name = str(msg.get("name") or "")
+            obs_call_id: str | None = last_call_id_by_tool.get(tool_name)
+            content_str = _coerce_text(msg.get("content") or "")
+            events.append(
+                ObservationEvent(
+                    content=content_str,
+                    source="tool_result",
+                    call_id=obs_call_id,
+                    timestamp=ts,
+                )
+            )
+            index += 1
+            framing_consumed = True
+            continue
+
+        # ---- Fall through: Anthropic-style block iteration ----------------
         blocks = _normalize_content(msg.get("content"))
 
-        # Treat the first system/user message that is pure text as task framing.
-        if not framing_consumed and role in ("system", "user") and all(
+        # Treat the first plain-text user message as task framing.
+        if not framing_consumed and role == "user" and all(
             b.get("type", "text") == "text" for b in blocks
         ):
             framing_consumed = True
             continue
 
+        # An assistant message with empty content + no function_call still
+        # consumes the framing slot to prevent later user messages being
+        # mis-flagged.
+        framing_consumed = True
+
         for block in blocks:
             btype = block.get("type", "text")
-            ts = _synthetic_ts(index)
+            block_ts = _synthetic_ts(index)
 
             if role == "assistant" and btype == "text":
-                events.append(
-                    ReasoningEvent(content=_coerce_text(block), timestamp=ts)
-                )
+                text = _coerce_text(block)
+                if text.strip():
+                    events.append(
+                        ReasoningEvent(content=text, timestamp=block_ts)
+                    )
+                    index += 1
             elif role == "assistant" and btype == "tool_use":
-                call_id = block.get("id")
-                if call_id is None:
-                    call_id = f"{transcript_id}-{synthesized_call_counter}"
+                block_call_id = block.get("id")
+                if block_call_id is None:
+                    block_call_id = f"{transcript_id}-{synthesized_call_counter}"
                     synthesized_call_counter += 1
                 events.append(
                     ToolCallEvent(
                         tool_name=block.get("name", "unknown"),
                         arguments=dict(block.get("input", {})),
-                        call_id=str(call_id),
-                        timestamp=ts,
+                        call_id=str(block_call_id),
+                        timestamp=block_ts,
                     )
                 )
+                index += 1
             elif btype == "tool_result" or (role in ("user", "tool") and btype != "text"):
-                call_id = block.get("tool_use_id") or block.get("call_id")
+                result_call_id = block.get("tool_use_id") or block.get("call_id")
                 events.append(
                     ObservationEvent(
                         content=_coerce_text(block.get("content", block)),
                         source="tool_result",
-                        call_id=str(call_id) if call_id is not None else None,
-                        timestamp=ts,
+                        call_id=str(result_call_id) if result_call_id is not None else None,
+                        timestamp=block_ts,
                     )
                 )
+                index += 1
             elif role in ("user", "tool") and btype == "text":
                 events.append(
                     ObservationEvent(
                         content=_coerce_text(block),
                         source="stdout",
-                        timestamp=ts,
+                        timestamp=block_ts,
                     )
                 )
+                index += 1
             else:
-                # Unrecognized block — preserve as reasoning so nothing is lost.
                 events.append(
                     ReasoningEvent(
                         content=f"[unrecognized {role}/{btype}] {_coerce_text(block)}",
-                        timestamp=ts,
+                        timestamp=block_ts,
                     )
                 )
-            index += 1
+                index += 1
 
     return events, index
 
@@ -234,13 +312,38 @@ def malt_row_to_trajectory(row: dict[str, Any]) -> Trajectory:
     """
     samples = row.get("samples") or []
     if not samples:
-        raise ValueError(f"MALT row has no samples: {row.get('id')!r}")
+        raise ValueError(f"MALT row has no samples: {row.get('id') or row.get('metadata', {}).get('run_id')!r}")
     sample = samples[0]
 
-    transcript_id = str(row.get("id") or row.get("transcript_id") or row.get("task_id") or "unknown")
+    # MALT's on-disk row has its metadata nested under "metadata"; for
+    # backward-compat with hand-crafted fixtures that flatten metadata to
+    # the row top-level, fall through to row-level keys.
+    md = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    md = md or {}
 
-    input_messages = sample.get("input_messages") or []
-    output_messages = sample.get("output_messages") or []
+    def _md(key: str, default: Any = None) -> Any:
+        if key in md:
+            return md[key]
+        return row.get(key, default)
+
+    transcript_id = str(
+        _md("run_id") or _md("id") or _md("transcript_id") or _md("task_id") or "unknown"
+    )
+
+    # Real MALT uses "input"/"output"; fixtures may use "input_messages"/"output_messages".
+    input_messages = sample.get("input") or sample.get("input_messages") or []
+
+    # `output` on real MALT rows is list[list[dict]] (one outer list per
+    # completion; v0.1 takes the first completion). Fixtures pass
+    # `output_messages` as list[dict] directly.
+    output_raw = sample.get("output") or sample.get("output_messages") or []
+    output_messages: list[dict[str, Any]] = []
+    if output_raw:
+        first = output_raw[0]
+        if isinstance(first, list):
+            output_messages = list(first)
+        elif isinstance(first, dict):
+            output_messages = list(output_raw)
 
     events, idx = _events_from_messages(
         input_messages, transcript_id=transcript_id, start_index=0
@@ -254,21 +357,21 @@ def malt_row_to_trajectory(row: dict[str, Any]) -> Trajectory:
     events.extend(score_events)
 
     metadata: dict[str, Any] = {
-        "labels": list(row.get("labels") or []),
-        "manually_reviewed": bool(row.get("manually_reviewed", False)),
-        "run_source": row.get("run_source"),
-        "has_chain_of_thought": bool(row.get("has_chain_of_thought", False)),
+        "labels": list(_md("labels") or []),
+        "manually_reviewed": bool(_md("manually_reviewed", False)),
+        "run_source": _md("run_source"),
+        "has_chain_of_thought": bool(_md("has_chain_of_thought", False)),
     }
-    # Pass through anything else the caller may want under a nested key.
-    for key in ("count", "task_family"):
-        if key in row:
-            metadata[key] = row[key]
+    for key in ("count", "task_family", "run_id", "public"):
+        val = _md(key)
+        if val is not None:
+            metadata[key] = val
 
     return Trajectory(
         trajectory_id=transcript_id,
         benchmark="malt-public",
-        task_id=str(row.get("task_id") or "unknown"),
-        agent_id=str(row.get("model")) if row.get("model") is not None else None,
+        task_id=str(_md("task_id") or "unknown"),
+        agent_id=str(_md("model")) if _md("model") is not None else None,
         events=events,
         harness_result=harness,
         workspace_root=None,
