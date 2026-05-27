@@ -112,3 +112,44 @@ Action needed: none, unless you want it reverted.
 guardrail is too conservative and we'd unnecessarily abstain on long
 trajectories. The CLI test in Phase 3 will surface this if it bites.
 Fix is a one-line edit if needed.
+
+## 5. Phase 3 live monitor calls blocked on Anthropic auth
+
+**Status: hard blocker for Phase 3 completion in this autonomous
+sandbox.** Documented in detail in `docs/v01_first_run.md`.
+
+The sandbox env exposes `ANTHROPIC_API_KEY` but its value is the empty
+string; `ANTHROPIC_BASE_URL` points at a managed proxy whose auth is
+session-scoped and not visible to the Anthropic SDK. Every monitor
+call fails with the SDK-level
+`Could not resolve authentication method` `TypeError` before any
+network spend. The CLI's per-call `Monitor call failed → abstain`
+path catches them all cleanly; the run completes with
+`$0.00 / $3.00 budget used` and a report card showing 20 abstains and
+no AUROC numbers.
+
+Per Standing Rules 5 (no secret handling), 6 (no operations outside
+the working tree), and 7 (no money beyond the session budget), I am
+not attempting to source a working key from anywhere else.
+
+**Options for you to unblock:**
+
+1. **Run locally outside Claude Code.** A normal shell with
+   `ANTHROPIC_API_KEY=sk-ant-...` (real key), `ANTHROPIC_BASE_URL`
+   unset, and HF auth via `hf auth login` will exercise the live
+   pipeline against `--limit 20 --budget-usd 3.00` exactly as the
+   prompt specified. Expected cost ≈ $2-3.
+2. **Expose a usable proxy token to the sandbox.** If the managed
+   proxy accepts bearer-style auth, set `ANTHROPIC_AUTH_TOKEN` (or
+   whatever name the proxy expects) in the autonomous-session env
+   and rerun.
+3. **Defer Phase 3 to a follow-up session.** v0.1 still ships in a
+   reviewable state — Tasks 1-5 are complete, the pipeline parses
+   real MALT rows correctly, and the only unfired step is the API
+   call itself.
+
+Recommendation: **option 1** for the v0.1.0 evidence; **option 3** to
+get the PR merged in this sandbox without further delay. The
+empirical findings from the Phase 3 attempt (real MALT schema, 1,826
+manually-reviewed rows, three adapter bug fixes) are valuable even
+without the live numbers.
