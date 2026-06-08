@@ -1,4 +1,4 @@
-"""Tests for the v0.1 ``trajaudit run`` CLI.
+"""Tests for the v0.1 ``monitorstress run`` CLI.
 
 Both the MALT loader and the METR monitor are monkey-patched so the
 tests are hermetic (no HF auth, no API calls).
@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from trajaudit.cli import app
-from trajaudit.core.events import ReasoningEvent, ScoringEvent, ToolCallEvent
-from trajaudit.core.trajectory import Trajectory
-from trajaudit.core.verdict import SemanticLabel, SemanticVerdict
+from monitorstress.cli import app
+from monitorstress.core.events import ReasoningEvent, ScoringEvent, ToolCallEvent
+from monitorstress.core.trajectory import Trajectory
+from monitorstress.core.verdict import SemanticLabel, SemanticVerdict
 
 runner = CliRunner()
 
@@ -131,7 +131,7 @@ def test_nonpositive_budget_exits_with_2() -> None:
 
 
 def _patch_cli(monkeypatch: pytest.MonkeyPatch, monitor: _FakeMonitor, *, n_pos: int = 20, n_neg: int = 20) -> None:
-    import trajaudit.cli as cli_mod
+    import monitorstress.cli as cli_mod
 
     monkeypatch.setattr(cli_mod, "load_malt_split", _fake_load_malt_split_factory(n_pos, n_neg))
     monkeypatch.setattr(cli_mod, "METRPromptMonitor", lambda: monitor)
@@ -200,7 +200,7 @@ def test_default_output_path_uses_timestamp(
         app, ["run", "--limit", "10", "--budget-usd", "10.0"]
     )
     assert result.exit_code == 0
-    written = list(tmp_path.glob("trajaudit_run_*.json"))
+    written = list(tmp_path.glob("monitorstress_run_*.json"))
     assert len(written) == 1
 
 
